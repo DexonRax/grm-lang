@@ -1,0 +1,45 @@
+extern "raylib.h";
+
+struct Game {
+    int score;
+    int screenW;
+    int screenH;
+
+    fn void init(Game& self) {
+        InitWindow(self.screenW, self.screenH, "GRM Game");
+        SetTargetFPS(60);
+    }
+
+    fn void update(Game& self) {
+        self.score = self.score + 1;
+    }
+
+    fn void draw(const Game& self) {
+        BeginDrawing();
+        ClearBackground(RAYWHITE);
+        DrawText("GRM + Raylib!", 10, 10, 20, BLACK);
+        DrawText(f"Score: {self.score}", 10, 40, 20, DARKGRAY);
+        EndDrawing();
+    }
+
+    fn void shutdown(Game& self) {
+        CloseWindow();
+    }
+}
+
+fn int main() {
+    Game game = { .score = 0, .screenW = 800, .screenH = 600 };
+
+    game.init();
+
+    while (!WindowShouldClose()) {
+        game.update();
+        game.draw();
+    }
+
+    game.shutdown();
+    return 0;
+}
+
+
+
