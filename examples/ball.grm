@@ -18,8 +18,8 @@ struct Ball {
     }
 
     fn void update(Ball& self, int screenW, int screenH) {
-        self.x = self.x + self.speedX;
-        self.y = self.y + self.speedY;
+        self.x += self.speedX;
+        self.y += self.speedY;
 
         if (self.x + self.radius >= screenW) {
             self.speedX = -self.speedX;

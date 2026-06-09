@@ -14,9 +14,9 @@ import re
 from grm_interpreter import (
     Lexer, Parser,
     Program, StructDecl, ImplBlock, FnDecl, ExternDecl, ImportDecl,
-    VarDecl, Return, ExprStmt, IfStmt, WhileStmt, Assign, Defer,
-    BinOp, UnaryOp, Call, FieldAccess, MethodCall,
-    Ident, Literal, FString, StructLiteral,
+    VarDecl, Return, ExprStmt, IfStmt, WhileStmt, ForStmt, Assign, Defer,
+    BinOp, UnaryOp, Call, FieldAccess, IndexAccess, MethodCall,
+    Ident, Literal, FString, StructLiteral, AnonStructLiteral, SizeOf, Ternary,
 )
 
 
@@ -384,6 +384,28 @@ class Transpiler:
             self.indent_level -= 1
             self.emit("}")
 
+        elif isinstance(stmt, ForStmt):
+            # init
+            if stmt.init is None:
+                init_str = ""
+            elif isinstance(stmt.init, VarDecl):
+                c_type = grm_type_to_c(stmt.init.type_str)
+                if stmt.init.init is not None:
+                    init_str = f"{c_type} {stmt.init.name} = {self.expr(stmt.init.init, struct_name)}"
+                else:
+                    init_str = f"{c_type} {stmt.init.name}"
+            elif isinstance(stmt.init, ExprStmt):
+                init_str = self.expr(stmt.init.expr, struct_name)
+            else:
+                init_str = ""
+            cond_str = self.expr(stmt.cond, struct_name) if stmt.cond else ""
+            step_str = self.expr(stmt.step, struct_name) if stmt.step else ""
+            self.emit(f"for ({init_str}; {cond_str}; {step_str}) {{")
+            self.indent_level += 1
+            self.emit_stmts(stmt.body, pending_defers, struct_name)
+            self.indent_level -= 1
+            self.emit("}")
+
         else:
             raise NotImplementedError(f"Unknown stmt: {type(stmt)}")
 
@@ -419,6 +441,27 @@ class Transpiler:
 
         if isinstance(node, UnaryOp):
             return f"({node.op}{self.expr(node.operand, struct_name)})"
+
+        if isinstance(node, IndexAccess):
+            obj = self.expr(node.obj, struct_name)
+            idx = self.expr(node.index, struct_name)
+            return f"{obj}[{idx}]"
+
+        if isinstance(node, Ternary):
+            c = self.expr(node.cond, struct_name)
+            t = self.expr(node.then, struct_name)
+            e = self.expr(node.else_, struct_name)
+            return f"({c} ? {t} : {e})"
+
+        if isinstance(node, SizeOf):
+            return f"sizeof({node.type_str})"
+
+        if isinstance(node, AnonStructLiteral):
+            fields = ", ".join(
+                f".{k} = {self.expr(v, struct_name)}"
+                for k, v in node.fields.items()
+            )
+            return f"{{{fields}}}"
 
         if isinstance(node, FieldAccess):
             obj = self.expr(node.obj, struct_name)

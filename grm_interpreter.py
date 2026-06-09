@@ -47,10 +47,14 @@ TK_STAREQ   = "*="
 TK_SLASHEQ  = "/="
 TK_PLUSPLUS = "++"
 TK_MINUSMINUS = "--"
+TK_LBRACKET = "["
+TK_RBRACKET = "]"
+TK_QUESTION = "?"
+TK_COLON    = ":"
 TK_EOF      = "EOF"
 
 KEYWORDS = {"struct", "impl", "fn", "return", "if", "else", "while", "for",
-            "int", "float", "bool", "void", "true", "false", "const", "defer", "extern", "import"}
+            "int", "float", "bool", "void", "true", "false", "const", "defer", "extern", "import", "sizeof"}
 
 
 @dataclass
@@ -150,12 +154,12 @@ class Lexer:
                 continue
 
             # numbers
-            if ch.isdigit() or (ch == "." and self.peek(1).isdigit()):
+            if ch.isdigit() or (ch == "." and (self.peek(1).isdigit() or self.peek(1) in ("f","F"))):
                 num = []
                 is_float = False
                 while self.peek().isdigit():
                     num.append(self.advance())
-                if self.peek() == "." and self.peek(1).isdigit():
+                if self.peek() == "." and (self.peek(1).isdigit() or self.peek(1) in ("f","F")):
                     is_float = True
                     num.append(self.advance())
                     while self.peek().isdigit():
@@ -238,6 +242,8 @@ class Lexer:
                 "+": TK_PLUS,  "-": TK_MINUS,
                 "*": TK_STAR,  "/": TK_SLASH,
                 "&": TK_AMP,   "!": TK_BANG,
+                "[": TK_LBRACKET, "]": TK_RBRACKET,
+                "?": TK_QUESTION, ":": TK_COLON,
             }
             if ch in simple:
                 self.tokens.append(Token(simple[ch], ch, line))
@@ -297,6 +303,10 @@ class StructLiteral:
     fields: dict          # {name: expr}
 
 @dataclass
+class AnonStructLiteral:
+    fields: dict          # {name: expr} — type inferred from context
+
+@dataclass
 class Assign:
     target: Any
     value: Any
@@ -316,6 +326,13 @@ class IfStmt:
     else_body: list
 
 @dataclass
+class ForStmt:
+    init: Any       # VarDecl or ExprStmt or None
+    cond: Any       # expr or None
+    step: Any       # expr or None
+    body: list
+
+@dataclass
 class WhileStmt:
     cond: Any
     body: list
@@ -323,6 +340,12 @@ class WhileStmt:
 @dataclass
 class Defer:
     expr: Any
+
+@dataclass
+class Ternary:
+    cond: Any
+    then: Any
+    else_: Any
 
 @dataclass
 class BinOp:
@@ -339,6 +362,11 @@ class UnaryOp:
 class Call:
     callee: Any           # expr that evaluates to callable
     args: list
+
+@dataclass
+class IndexAccess:
+    obj: Any
+    index: Any
 
 @dataclass
 class FieldAccess:
@@ -358,6 +386,10 @@ class Ident:
 @dataclass
 class Literal:
     value: Any
+
+@dataclass
+class SizeOf:
+    type_str: str   # raw content of sizeof(...), passed through verbatim
 
 @dataclass
 class FString:
@@ -525,6 +557,8 @@ class Parser:
             return self.parse_return()
         if self.match("if"):
             return self.parse_if()
+        if self.match("for"):
+            return self.parse_for()
         if self.match("while"):
             return self.parse_while()
         if self.match("defer"):
@@ -555,6 +589,34 @@ class Parser:
             else:
                 else_body = self.parse_block()
         return IfStmt(cond, then_body, else_body)
+
+    def parse_for(self):
+        self.expect("for")
+        self.expect(TK_LPAREN)
+        # init: var decl or expr or empty
+        if self.match(TK_SEMI):
+            init = None
+            self.advance()
+        elif self.is_type() and self.peek().kind == TK_IDENT:
+            init = self.parse_var_decl()   # consumes semicolon
+        else:
+            init = ExprStmt(self.parse_expr())
+            self.expect(TK_SEMI)
+        # cond
+        if self.match(TK_SEMI):
+            cond = None
+            self.advance()
+        else:
+            cond = self.parse_expr()
+            self.expect(TK_SEMI)
+        # step
+        if self.match(TK_RPAREN):
+            step = None
+        else:
+            step = self.parse_expr()
+        self.expect(TK_RPAREN)
+        body = self.parse_block()
+        return ForStmt(init, cond, step, body)
 
     def parse_while(self):
         self.expect("while")
@@ -609,23 +671,27 @@ class Parser:
         return self.parse_assign()
 
     def parse_assign(self):
-        left = self.parse_comparison()
-        if self.match(TK_EQ):
-            self.advance()
+        left = self.parse_ternary()
+        if self.current().kind in (TK_EQ, TK_PLUSEQ, TK_MINUSEQ, TK_STAREQ, TK_SLASHEQ):
+            compound = {TK_PLUSEQ: "+", TK_MINUSEQ: "-", TK_STAREQ: "*", TK_SLASHEQ: "/"}
+            tok = self.advance()
             right = self.parse_assign()
-            return Assign(left, right)
-        # compound assignment: desugar into Assign(left, BinOp(op, left, right))
-        compound = {
-            TK_PLUSEQ:  "+",
-            TK_MINUSEQ: "-",
-            TK_STAREQ:  "*",
-            TK_SLASHEQ: "/",
-        }
-        if self.current().kind in compound:
-            op = compound[self.advance().kind]
-            right = self.parse_assign()
-            return Assign(left, BinOp(op, left, right))
+            if tok.kind == TK_EQ:
+                return Assign(left, right)
+            return Assign(left, BinOp(compound[tok.kind], left, right))
         return left
+
+    def parse_ternary(self):
+        cond = self.parse_comparison()
+        if self.match(TK_QUESTION):
+            self.advance()
+            then = self.parse_expr()
+            self.expect(TK_COLON)
+            else_ = self.parse_ternary()  # right-associative
+            return Ternary(cond, then, else_)
+        return cond
+
+
 
     def parse_comparison(self):
         left = self.parse_additive()
@@ -652,6 +718,14 @@ class Parser:
         return left
 
     def parse_unary(self):
+        if self.match(TK_PLUSPLUS):
+            self.advance()
+            operand = self.parse_unary()
+            return Assign(operand, BinOp("+", operand, Literal(1)))
+        if self.match(TK_MINUSMINUS):
+            self.advance()
+            operand = self.parse_unary()
+            return Assign(operand, BinOp("-", operand, Literal(1)))
         if self.match(TK_BANG):
             self.advance()
             return UnaryOp("!", self.parse_unary())
@@ -669,6 +743,12 @@ class Parser:
     def parse_postfix(self):
         expr = self.parse_primary()
         while True:
+            if self.match(TK_LBRACKET):
+                self.advance()
+                index = self.parse_expr()
+                self.expect(TK_RBRACKET)
+                expr = IndexAccess(expr, index)
+                continue
             if self.match(TK_PLUSPLUS):
                 self.advance()
                 expr = Assign(expr, BinOp("+", expr, Literal(1)))
@@ -739,6 +819,39 @@ class Parser:
                                                        "while", "for"):
             self.advance()
             return Ident(tok.value)
+        if tok.kind == "sizeof":
+            self.advance()
+            self.expect(TK_LPAREN)
+            # sizeof can take a type name or an expression — we treat both as opaque
+            inner_tokens = []
+            depth = 1
+            while depth > 0 and not self.match(TK_EOF):
+                t = self.current()
+                if t.kind == TK_LPAREN: depth += 1
+                elif t.kind == TK_RPAREN:
+                    depth -= 1
+                    if depth == 0:
+                        break
+                inner_tokens.append(t.value if t.value is not None else t.kind)
+                self.advance()
+            self.expect(TK_RPAREN)
+            return SizeOf("".join(str(x) for x in inner_tokens))
+        if tok.kind == TK_LBRACE:
+            # anonymous struct literal: { .field = val, ... }
+            # only valid if first token after { is a dot
+            if self.peek(1).kind == TK_DOT or (self.peek(1).kind == TK_RBRACE):
+                self.advance()  # consume {
+                fields = {}
+                while not self.match(TK_RBRACE):
+                    self.expect(TK_DOT)
+                    fname = self.expect(TK_IDENT).value
+                    self.expect(TK_EQ)
+                    val = self.parse_expr()
+                    fields[fname] = val
+                    if self.match(TK_COMMA):
+                        self.advance()
+                self.expect(TK_RBRACE)
+                return AnonStructLiteral(fields)
         if tok.kind == TK_LPAREN:
             self.advance()
             expr = self.parse_expr()
@@ -883,6 +996,14 @@ class Interpreter:
             while self.eval_expr(stmt.cond, env):
                 self.exec_block(stmt.body, env)
 
+        elif isinstance(stmt, ForStmt):
+            if stmt.init is not None:
+                self.exec_stmt(stmt.init, env)
+            while (stmt.cond is None or self.eval_expr(stmt.cond, env)):
+                self.exec_block(stmt.body, env)
+                if stmt.step is not None:
+                    self.eval_expr(stmt.step, env)
+
         else:
             raise RuntimeError(f"Unknown statement: {type(stmt)}")
 
@@ -895,6 +1016,10 @@ class Interpreter:
                 obj.fields[target.field] = val
             else:
                 raise RuntimeError(f"Cannot assign field on {obj!r}")
+        elif isinstance(target, IndexAccess):
+            obj = self.eval_expr(target.obj, env)
+            idx = self.eval_expr(target.index, env)
+            obj[idx] = val
         else:
             raise RuntimeError(f"Cannot assign to {target!r}")
 
@@ -930,6 +1055,15 @@ class Interpreter:
             if expr.op == "!":
                 return not v
 
+        if isinstance(expr, IndexAccess):
+            obj = self.eval_expr(expr.obj, env)
+            idx = self.eval_expr(expr.index, env)
+            return obj[idx]
+
+        if isinstance(expr, SizeOf):
+            # interpreter: return a placeholder (sizeof is a compile-time C concept)
+            return 0
+
         if isinstance(expr, FieldAccess):
             obj = self.eval_expr(expr.obj, env)
             if isinstance(obj, GRMInstance):
@@ -959,6 +1093,13 @@ class Interpreter:
             for fname, fexpr in expr.fields.items():
                 inst.fields[fname] = self.eval_expr(fexpr, env)
             return inst
+
+        if isinstance(expr, Ternary):
+            return self.eval_expr(expr.then if self.eval_expr(expr.cond, env) else expr.else_, env)
+
+        if isinstance(expr, AnonStructLiteral):
+            # interpreter: return a dict of evaluated fields
+            return {k: self.eval_expr(v, env) for k, v in expr.fields.items()}
 
         if isinstance(expr, Assign):
             val = self.eval_expr(expr.value, env)
