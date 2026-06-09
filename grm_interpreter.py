@@ -41,6 +41,12 @@ TK_SLASH    = "/"
 TK_AMP      = "&"
 TK_BANG     = "!"
 TK_DOT_FIELD= ".FIELD"   # .name in struct literals
+TK_PLUSEQ   = "+="
+TK_MINUSEQ  = "-="
+TK_STAREQ   = "*="
+TK_SLASHEQ  = "/="
+TK_PLUSPLUS = "++"
+TK_MINUSMINUS = "--"
 TK_EOF      = "EOF"
 
 KEYWORDS = {"struct", "impl", "fn", "return", "if", "else", "while", "for",
@@ -196,6 +202,30 @@ class Lexer:
             if ch == ">" and self.peek(1) == "=":
                 self.advance(); self.advance()
                 self.tokens.append(Token(TK_GTE, ">=", line))
+                continue
+            if ch == "+" and self.peek(1) == "+":
+                self.advance(); self.advance()
+                self.tokens.append(Token(TK_PLUSPLUS, "++", line))
+                continue
+            if ch == "-" and self.peek(1) == "-":
+                self.advance(); self.advance()
+                self.tokens.append(Token(TK_MINUSMINUS, "--", line))
+                continue
+            if ch == "+" and self.peek(1) == "=":
+                self.advance(); self.advance()
+                self.tokens.append(Token(TK_PLUSEQ, "+=", line))
+                continue
+            if ch == "-" and self.peek(1) == "=":
+                self.advance(); self.advance()
+                self.tokens.append(Token(TK_MINUSEQ, "-=", line))
+                continue
+            if ch == "*" and self.peek(1) == "=":
+                self.advance(); self.advance()
+                self.tokens.append(Token(TK_STAREQ, "*=", line))
+                continue
+            if ch == "/" and self.peek(1) == "=":
+                self.advance(); self.advance()
+                self.tokens.append(Token(TK_SLASHEQ, "/=", line))
                 continue
 
             # single-char tokens
@@ -584,6 +614,17 @@ class Parser:
             self.advance()
             right = self.parse_assign()
             return Assign(left, right)
+        # compound assignment: desugar into Assign(left, BinOp(op, left, right))
+        compound = {
+            TK_PLUSEQ:  "+",
+            TK_MINUSEQ: "-",
+            TK_STAREQ:  "*",
+            TK_SLASHEQ: "/",
+        }
+        if self.current().kind in compound:
+            op = compound[self.advance().kind]
+            right = self.parse_assign()
+            return Assign(left, BinOp(op, left, right))
         return left
 
     def parse_comparison(self):
@@ -628,6 +669,14 @@ class Parser:
     def parse_postfix(self):
         expr = self.parse_primary()
         while True:
+            if self.match(TK_PLUSPLUS):
+                self.advance()
+                expr = Assign(expr, BinOp("+", expr, Literal(1)))
+                break  # postfix inc/dec can't chain
+            if self.match(TK_MINUSMINUS):
+                self.advance()
+                expr = Assign(expr, BinOp("-", expr, Literal(1)))
+                break
             if self.match(TK_DOT):
                 self.advance()
                 name = self.expect(TK_IDENT).value
@@ -826,13 +875,13 @@ class Interpreter:
         elif isinstance(stmt, IfStmt):
             cond = self.eval_expr(stmt.cond, env)
             if cond:
-                self.exec_block(stmt.then_body, dict(env))
+                self.exec_block(stmt.then_body, env)
             else:
-                self.exec_block(stmt.else_body, dict(env))
+                self.exec_block(stmt.else_body, env)
 
         elif isinstance(stmt, WhileStmt):
             while self.eval_expr(stmt.cond, env):
-                self.exec_block(stmt.body, dict(env))
+                self.exec_block(stmt.body, env)
 
         else:
             raise RuntimeError(f"Unknown statement: {type(stmt)}")

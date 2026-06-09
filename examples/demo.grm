@@ -1,0 +1,39 @@
+struct Counter {
+    int value;
+    str label;
+
+    fn void init(Counter& self, str label) {
+        self.value = 0;
+        self.label = label;
+    }
+
+    fn void increment(Counter& self) {
+        self.value = self.value + 1;
+    }
+
+    fn void print(const Counter& self) {
+        printf(f"[{self.label}] Count: {self.value}\n");
+    }
+
+    fn bool isEven(const Counter& self) {
+        return (self.value / 2) * 2 == self.value;
+    }
+}
+
+fn int main() {
+    Counter counter;
+    counter.init("Demo");
+
+    int i = 0;
+    while (i < 5) {
+        counter.increment();
+        counter.print();
+        if (counter.isEven()) {
+            printf(f"{counter.label} has an even count!\n");
+        }
+        i = i + 1;
+    }
+
+    printf("Done!\n");
+    return 0;
+}

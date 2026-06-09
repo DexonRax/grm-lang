@@ -1,0 +1,69 @@
+extern "raylib.h";
+
+struct Ball {
+    int x;
+    int y;
+    int radius;
+    int speedX;
+    int speedY;
+	int bounces;
+
+    fn void init(Ball& self, int x, int y, int r, int sx, int sy) {
+        self.x = x;
+        self.y = y;
+        self.radius = r;
+        self.speedX = sx;
+        self.speedY = sy;
+		self.bounces = 0;
+    }
+
+    fn void update(Ball& self, int screenW, int screenH) {
+        self.x = self.x + self.speedX;
+        self.y = self.y + self.speedY;
+
+        if (self.x + self.radius >= screenW) {
+            self.speedX = -self.speedX;
+			self.bounces++;
+        }
+        if (self.x - self.radius <= 0) {
+            self.speedX = -self.speedX;
+			self.bounces++;
+        }
+        if (self.y + self.radius >= screenH) {
+            self.speedY = -self.speedY;
+			self.bounces++;
+        }
+        if (self.y - self.radius <= 0) {
+            self.speedY = -self.speedY;
+			self.bounces++;
+        }
+    }
+
+    fn void draw(const Ball& self) {
+        DrawCircle(self.x, self.y, self.radius, MAROON);
+    }
+}
+
+fn int main() {
+    InitWindow(800, 600, "GRM + Raylib - Bouncing Ball");
+    SetTargetFPS(60);
+
+    Ball ball;
+    ball.init(400, 300, 20, 5, 3);
+
+    while (!WindowShouldClose()) {
+        ball.update(800, 600);
+
+        BeginDrawing();
+        ClearBackground(RAYWHITE);
+
+        DrawText("Bouncing Ball Demo", 10, 10, 20, DARKGRAY);
+		DrawText(f"Bounces: {ball.bounces}", 10, 30, 20, DARKGRAY);
+        ball.draw();
+
+        EndDrawing();
+    }
+
+    CloseWindow();
+    return 0;
+}
