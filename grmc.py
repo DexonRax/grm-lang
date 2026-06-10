@@ -16,7 +16,7 @@ from grm_interpreter import (
     Program, StructDecl, ImplBlock, FnDecl, ExternDecl, ImportDecl,
     VarDecl, Return, ExprStmt, IfStmt, WhileStmt, ForStmt, Assign, Defer,
     BinOp, UnaryOp, Call, FieldAccess, IndexAccess, MethodCall,
-    Ident, Literal, FString, StructLiteral, AnonStructLiteral, SizeOf, Ternary,
+    Ident, Literal, FString, StructLiteral, AnonStructLiteral, PositionalLiteral, CastLiteral, SizeOf, Ternary,
 )
 
 
@@ -250,8 +250,11 @@ class Transpiler:
     def emit_struct_typedef(self, node: StructDecl):
         self.emit(f"struct {node.name} {{")
         self.indent_level += 1
-        for (ftype, fname) in node.fields:
-            self.emit(f"{self.map_field_type(ftype)} {fname};")
+        for field in node.fields:
+            ftype, fname = field[0], field[1]
+            default = field[2] if len(field) > 2 else None
+            suffix = f"  // default: {self.expr(default, None)}" if default is not None else ""
+            self.emit(f"{self.map_field_type(ftype)} {fname};{suffix}")
         self.indent_level -= 1
         self.emit("};")
         self.emit()
@@ -463,6 +466,14 @@ class Transpiler:
             )
             return f"{{{fields}}}"
 
+        if isinstance(node, CastLiteral):
+            vals = ", ".join(self.expr(v, struct_name) for v in node.values)
+            return f"({node.type_name}){{{vals}}}"
+
+        if isinstance(node, PositionalLiteral):
+            vals = ", ".join(self.expr(v, struct_name) for v in node.values)
+            return f"{{{vals}}}"
+
         if isinstance(node, FieldAccess):
             obj = self.expr(node.obj, struct_name)
             # if obj is 'self' we use ->, otherwise . (heuristic: self is a pointer)
@@ -531,7 +542,8 @@ class Transpiler:
         if isinstance(node, FieldAccess):
             owner_type = self.infer_type(node.obj, struct_name)
             if owner_type in self.struct_defs:
-                for (ft, fn) in self.struct_defs[owner_type].fields:
+                for field in self.struct_defs[owner_type].fields:
+                    ft, fn = field[0], field[1]
                     if fn == node.field:
                         return ft.lstrip("const ").rstrip("&* ")
         if isinstance(node, MethodCall):
@@ -613,7 +625,8 @@ class Transpiler:
         if isinstance(node, FieldAccess):
             owner_type = self.infer_type(node.obj, struct_name)
             if owner_type in self.struct_defs:
-                for (ft, fn) in self.struct_defs[owner_type].fields:
+                for field in self.struct_defs[owner_type].fields:
+                    ft, fn = field[0], field[1]
                     if fn == node.field:
                         return self.type_to_specifier(ft)
         return "%s"  # safe fallback

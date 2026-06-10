@@ -153,21 +153,24 @@ class Lexer:
                 self.tokens.append(Token(TK_STRING, raw, line))
                 continue
 
-            # numbers
-            if ch.isdigit() or (ch == "." and (self.peek(1).isdigit() or self.peek(1) in ("f","F"))):
+            # numbers: handles 123, 1.5, 1.f, 0.f, .5f
+            # NOTE: "." only starts a number if followed by a DIGIT (not f/F alone)
+            #       to avoid eating field access like self.fc, self.fs
+            if ch.isdigit() or (ch == "." and self.peek(1).isdigit()):
                 num = []
                 is_float = False
                 while self.peek().isdigit():
                     num.append(self.advance())
                 if self.peek() == "." and (self.peek(1).isdigit() or self.peek(1) in ("f","F")):
                     is_float = True
-                    num.append(self.advance())
+                    num.append(self.advance())   # the dot
                     while self.peek().isdigit():
                         num.append(self.advance())
                 if self.peek() in ("f", "F"):
                     self.advance()
                     is_float = True
-                val = float("".join(num)) if is_float else int("".join(num))
+                raw = "".join(num) or "0"
+                val = float(raw) if is_float else int(raw)
                 self.tokens.append(Token(TK_FLOAT if is_float else TK_INT, val, line))
                 continue
 
@@ -301,6 +304,15 @@ class VarDecl:
 class StructLiteral:
     type_name: str
     fields: dict          # {name: expr}
+
+@dataclass
+class CastLiteral:
+    type_name: str    # e.g. "Vector2"
+    values: list      # positional values
+
+@dataclass
+class PositionalLiteral:
+    values: list    # [expr, expr, ...] — positional, no field names
 
 @dataclass
 class AnonStructLiteral:
@@ -504,8 +516,13 @@ class Parser:
             elif self.is_type():
                 t = self.parse_type()
                 n = self.expect(TK_IDENT).value
+                default = None
+                if self.match(TK_EQ):
+                    # field default value — consumed and stored for future use
+                    self.advance()
+                    default = self.parse_expr()
                 self.expect(TK_SEMI)
-                fields.append((t, n))
+                fields.append((t, n, default))
             else:
                 self.error("Expected field or method in struct")
         self.expect(TK_RBRACE)
@@ -837,9 +854,9 @@ class Parser:
             self.expect(TK_RPAREN)
             return SizeOf("".join(str(x) for x in inner_tokens))
         if tok.kind == TK_LBRACE:
-            # anonymous struct literal: { .field = val, ... }
-            # only valid if first token after { is a dot
-            if self.peek(1).kind == TK_DOT or (self.peek(1).kind == TK_RBRACE):
+            next_tok = self.peek(1)
+            if next_tok.kind == TK_DOT or next_tok.kind == TK_RBRACE:
+                # designated: { .field = val, ... }
                 self.advance()  # consume {
                 fields = {}
                 while not self.match(TK_RBRACE):
@@ -852,8 +869,33 @@ class Parser:
                         self.advance()
                 self.expect(TK_RBRACE)
                 return AnonStructLiteral(fields)
+            else:
+                # positional: { expr, expr, ... }
+                self.advance()  # consume {
+                values = []
+                while not self.match(TK_RBRACE):
+                    values.append(self.parse_expr())
+                    if self.match(TK_COMMA):
+                        self.advance()
+                self.expect(TK_RBRACE)
+                return PositionalLiteral(values)
         if tok.kind == TK_LPAREN:
             self.advance()
+            # check for compound literal cast: (TypeName){ ... }
+            if self.is_type() and self.peek().kind == TK_RPAREN:
+                type_name = self.parse_type()
+                self.expect(TK_RPAREN)
+                if self.match(TK_LBRACE):
+                    self.advance()
+                    values = []
+                    while not self.match(TK_RBRACE):
+                        values.append(self.parse_expr())
+                        if self.match(TK_COMMA):
+                            self.advance()
+                    self.expect(TK_RBRACE)
+                    return CastLiteral(type_name, values)
+                # not a compound literal, just a cast expression — put type back as ident
+                return Ident(type_name)
             expr = self.parse_expr()
             self.expect(TK_RPAREN)
             return expr
@@ -1098,8 +1140,13 @@ class Interpreter:
             return self.eval_expr(expr.then if self.eval_expr(expr.cond, env) else expr.else_, env)
 
         if isinstance(expr, AnonStructLiteral):
-            # interpreter: return a dict of evaluated fields
             return {k: self.eval_expr(v, env) for k, v in expr.fields.items()}
+
+        if isinstance(expr, CastLiteral):
+            return [self.eval_expr(v, env) for v in expr.values]
+
+        if isinstance(expr, PositionalLiteral):
+            return [self.eval_expr(v, env) for v in expr.values]
 
         if isinstance(expr, Assign):
             val = self.eval_expr(expr.value, env)

@@ -9,8 +9,9 @@ struct Ball {
 	int bounces;
 
     fn void init(Ball& self, int x, int y, int r, int sx, int sy) {
-        self.x = x;
-        self.y = y;
+        Vector2 pos = GetWindowPosition();
+        self.x = x + pos.x;
+        self.y = y + pos.y;
         self.radius = r;
         self.speedX = sx;
         self.speedY = sy;
@@ -18,10 +19,12 @@ struct Ball {
     }
 
     fn void update(Ball& self, int screenW, int screenH) {
+        Vector2 pos = GetWindowPosition();
+
         self.x += self.speedX;
         self.y += self.speedY;
 
-        if (self.x + self.radius >= screenW) {
+        if (self.x + self.radius >= 1920) {
             self.speedX = -self.speedX;
 			self.bounces++;
         }
@@ -29,7 +32,7 @@ struct Ball {
             self.speedX = -self.speedX;
 			self.bounces++;
         }
-        if (self.y + self.radius >= screenH) {
+        if (self.y + self.radius >= 1080) {
             self.speedY = -self.speedY;
 			self.bounces++;
         }
@@ -40,7 +43,8 @@ struct Ball {
     }
 
     fn void draw(const Ball& self) {
-        DrawCircle(self.x, self.y, self.radius, MAROON);
+        Vector2 pos = GetWindowPosition();
+        DrawCircle(self.x - pos.x, self.y - pos.y, self.radius, MAROON);
     }
 }
 
