@@ -13,8 +13,8 @@ import os
 import re
 from grm_interpreter import (
     Lexer, Parser,
-    Program, StructDecl, ImplBlock, FnDecl, ExternDecl, ImportDecl,
-    VarDecl, Return, ExprStmt, IfStmt, WhileStmt, ForStmt, Assign, Defer,
+    Program, StructDecl, ImplBlock, FnDecl, ExternDecl, ImportDecl, DefineDecl,
+    VarDecl, Return, ExprStmt, IfStmt, WhileStmt, ForStmt, Assign, Defer, Continue, Break,
     BinOp, UnaryOp, Call, FieldAccess, IndexAccess, MethodCall,
     Ident, Literal, FString, StructLiteral, AnonStructLiteral, PositionalLiteral, CastLiteral, SizeOf, Ternary,
 )
@@ -23,6 +23,16 @@ from grm_interpreter import (
 # ─────────────────────────────────────────────
 # TYPE MAPPING
 # ─────────────────────────────────────────────
+
+# Common external (e.g. raylib/raymath) struct types whose fields are all
+# float, so f-string interpolation of their members picks %g instead of
+# falling back to %s (which causes a segfault: vsnprintf treats the float's
+# bit pattern as a char* pointer and dereferences it).
+KNOWN_EXTERNAL_FLOAT_STRUCTS = {
+    "Vector2", "Vector3", "Vector4", "Quaternion", "Matrix",
+    "Rectangle", "Color",  # Color is actually unsigned char, but rarely interpolated
+}
+
 
 def grm_type_to_c(t: str) -> str:
     """
@@ -108,6 +118,7 @@ class Transpiler:
         self.out: list[str] = []
         self.sym: dict[str, str] = {}                  # var name -> GRM type
         self.needs_grm_fmt = False
+        self.ptr_params: set[str] = set()   # param names that are & references (pointers in C)
 
     # ── output helpers ──
 
@@ -203,6 +214,15 @@ class Transpiler:
                     self.emit(f"#include <{ext.path}>")
                 else:
                     self.emit(f'#include "{ext.path}"')
+
+        defines = [n for n in program.body if isinstance(n, DefineDecl)]
+        if defines:
+            self.emit()
+            for d in defines:
+                if d.value is not None:
+                    self.emit(f"#define {d.name} {self.expr(d.value, None)}")
+                else:
+                    self.emit(f"#define {d.name}")
         self.emit()
 
         # prescan for f-strings used as foreign-call arguments
@@ -307,6 +327,12 @@ class Transpiler:
             params = self.emit_params(fn.params)
             sig = f"{ret} {fn.name}({params})"
 
+        # track which params are references (&) -> pointers in C -> need ->
+        self.ptr_params = set()
+        for (ptype, pname) in fn.params:
+            if ptype.endswith("&"):
+                self.ptr_params.add(pname)
+
         self.emit(f"{sig} {{")
         self.indent_level += 1
 
@@ -408,6 +434,12 @@ class Transpiler:
             self.emit_stmts(stmt.body, pending_defers, struct_name)
             self.indent_level -= 1
             self.emit("}")
+
+        elif isinstance(stmt, Continue):
+            self.emit("continue;")
+
+        elif isinstance(stmt, Break):
+            self.emit("break;")
 
         else:
             raise NotImplementedError(f"Unknown stmt: {type(stmt)}")
@@ -546,6 +578,10 @@ class Transpiler:
                     ft, fn = field[0], field[1]
                     if fn == node.field:
                         return ft.lstrip("const ").rstrip("&* ")
+            elif owner_type in KNOWN_EXTERNAL_FLOAT_STRUCTS:
+                # Vector2/Vector3/.../Rectangle: every field (.x, .y, .z, .w,
+                # .width, .height, etc.) is a float
+                return "float"
         if isinstance(node, MethodCall):
             obj_type = self.infer_type(node.obj, struct_name)
             if obj_type in self.struct_defs:
@@ -556,8 +592,11 @@ class Transpiler:
 
     def is_pointer_expr(self, node) -> bool:
         """True if this expression is already a pointer (i.e. use -> not .)"""
-        if isinstance(node, Ident) and node.name == "self":
-            return True
+        if isinstance(node, Ident):
+            if node.name == "self":
+                return True
+            if node.name in self.ptr_params:
+                return True
         return False
 
     # ── f-string → printf ──
@@ -629,7 +668,14 @@ class Transpiler:
                     ft, fn = field[0], field[1]
                     if fn == node.field:
                         return self.type_to_specifier(ft)
-        return "%s"  # safe fallback
+            elif owner_type in KNOWN_EXTERNAL_FLOAT_STRUCTS:
+                return "%g"
+        # Fallback: %s is dangerous here — if the value is actually numeric
+        # (float/int passed through varargs), vsnprintf will treat its bit
+        # pattern as a char* and dereference it -> SIGSEGV. %g is the much
+        # safer unknown-type fallback: floats print correctly, ints print as
+        # a (large but harmless) number, and it never dereferences memory.
+        return "%g"
 
     def type_to_specifier(self, t: str) -> str:
         return {
@@ -747,6 +793,15 @@ def transpile_to_files(source: str, module_name: str, extern_structs: dict = Non
         h.append("")
         for imp in imports:
             h.append(f'#include "{imp.path}.h"')
+
+    defines = [n for n in program.body if isinstance(n, DefineDecl)]
+    if defines:
+        h.append("")
+        for d in defines:
+            if d.value is not None:
+                h.append(f"#define {d.name} {t.expr(d.value, None)}")
+            else:
+                h.append(f"#define {d.name}")
 
     if t.needs_grm_fmt:
         h.append("")

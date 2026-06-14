@@ -51,10 +51,14 @@ TK_LBRACKET = "["
 TK_RBRACKET = "]"
 TK_QUESTION = "?"
 TK_COLON    = ":"
+TK_OROR     = "||"
+TK_ANDAND   = "&&"
+TK_HASH     = "#"
 TK_EOF      = "EOF"
 
 KEYWORDS = {"struct", "impl", "fn", "return", "if", "else", "while", "for",
-            "int", "float", "bool", "void", "true", "false", "const", "defer", "extern", "import", "sizeof"}
+            "int", "float", "bool", "void", "true", "false", "const", "defer", "extern", "import", "sizeof",
+            "continue", "break", "define"}
 
 
 @dataclass
@@ -98,7 +102,10 @@ class Lexer:
     def skip_whitespace_and_comments(self):
         while self.pos < len(self.src):
             ch = self.peek()
-            if ch in " \t\r\n":
+            # treat ANY unicode whitespace (incl. non-breaking space, zero-width
+            # space, etc.) as skippable — these are invisible in editors and
+            # can come from copy-pasted code, causing confusing lexer errors
+            if ch.isspace():
                 self.advance()
             elif ch == "/" and self.peek(1) == "/":
                 while self.pos < len(self.src) and self.peek() != "\n":
@@ -174,10 +181,13 @@ class Lexer:
                 self.tokens.append(Token(TK_FLOAT if is_float else TK_INT, val, line))
                 continue
 
-            # identifiers / keywords
-            if ch.isalpha() or ch == "_":
+            # identifiers / keywords — ASCII only, matching C identifier rules.
+            # (Unicode letters are intentionally excluded so stray Unicode
+            # characters from copy-paste produce a clear lexer error instead
+            # of silently merging into an identifier.)
+            if (ch.isascii() and ch.isalpha()) or ch == "_":
                 word = []
-                while self.peek().isalpha() or self.peek().isdigit() or self.peek() == "_":
+                while (self.peek().isascii() and (self.peek().isalpha() or self.peek().isdigit())) or self.peek() == "_":
                     word.append(self.advance())
                 word = "".join(word)
                 kind = word if word in KEYWORDS else TK_IDENT
@@ -209,6 +219,14 @@ class Lexer:
             if ch == ">" and self.peek(1) == "=":
                 self.advance(); self.advance()
                 self.tokens.append(Token(TK_GTE, ">=", line))
+                continue
+            if ch == "|" and self.peek(1) == "|":
+                self.advance(); self.advance()
+                self.tokens.append(Token(TK_OROR, "||", line))
+                continue
+            if ch == "&" and self.peek(1) == "&":
+                self.advance(); self.advance()
+                self.tokens.append(Token(TK_ANDAND, "&&", line))
                 continue
             if ch == "+" and self.peek(1) == "+":
                 self.advance(); self.advance()
@@ -247,6 +265,7 @@ class Lexer:
                 "&": TK_AMP,   "!": TK_BANG,
                 "[": TK_LBRACKET, "]": TK_RBRACKET,
                 "?": TK_QUESTION, ":": TK_COLON,
+                "#": TK_HASH,
             }
             if ch in simple:
                 self.tokens.append(Token(simple[ch], ch, line))
@@ -266,6 +285,11 @@ class Lexer:
 @dataclass
 class Program:
     body: list
+
+@dataclass
+class DefineDecl:
+    name: str
+    value: Any   # expr, or None for valueless #define
 
 @dataclass
 class ImportDecl:
@@ -348,6 +372,14 @@ class ForStmt:
 class WhileStmt:
     cond: Any
     body: list
+
+@dataclass
+class Continue:
+    pass
+
+@dataclass
+class Break:
+    pass
 
 @dataclass
 class Defer:
@@ -451,6 +483,8 @@ class Parser:
         return Program(body)
 
     def parse_top(self):
+        if self.match(TK_HASH):
+            return self.parse_define()
         if self.match("import"):
             return self.parse_import()
         if self.match("extern"):
@@ -465,6 +499,28 @@ class Parser:
         if self.is_type():
             return self.parse_var_decl()
         self.error("Unexpected token at top level")
+
+    # ── #define ──
+
+    def parse_define(self):
+        self.expect(TK_HASH)
+        self.expect("define")
+        name = self.expect(TK_IDENT).value
+        value = None
+        # GRM-friendly: #define NAME = expr;
+        if self.match(TK_EQ):
+            self.advance()
+            value = self.parse_expr()
+            if self.match(TK_SEMI):
+                self.advance()
+        # C-style: #define NAME expr   (no '=', no ';')
+        elif not self.match(TK_SEMI) and not self.match(TK_EOF) \
+                and self.current().line == self.tokens[self.pos - 1].line:
+            # only consume if something follows on the SAME line as the name
+            value = self.parse_expr()
+            if self.match(TK_SEMI):
+                self.advance()
+        return DefineDecl(name, value)
 
     # ── import ──
 
@@ -580,6 +636,14 @@ class Parser:
             return self.parse_while()
         if self.match("defer"):
             return self.parse_defer()
+        if self.match("continue"):
+            self.advance()
+            self.expect(TK_SEMI)
+            return Continue()
+        if self.match("break"):
+            self.advance()
+            self.expect(TK_SEMI)
+            return Break()
         if self.is_type() and self.peek().kind == TK_IDENT:
             return self.parse_var_decl()
         return self.parse_expr_stmt()
@@ -655,7 +719,6 @@ class Parser:
         init = None
         if self.match(TK_EQ):
             self.advance()
-            # struct literal: TypeName = { .field = val, ... }
             if self.match(TK_LBRACE):
                 init = self.parse_struct_literal(t)
             else:
@@ -664,18 +727,33 @@ class Parser:
         return VarDecl(t, name, init)
 
     def parse_struct_literal(self, type_name):
+        """
+        Handles both:
+            TypeName x = { .field = val, ... }   — designated initializer
+            TypeName x = { val, val, val }       — positional initializer
+        """
         self.expect(TK_LBRACE)
-        fields = {}
-        while not self.match(TK_RBRACE):
-            self.expect(TK_DOT)
-            fname = self.expect(TK_IDENT).value
-            self.expect(TK_EQ)
-            val = self.parse_expr()
-            fields[fname] = val
-            if self.match(TK_COMMA):
-                self.advance()
-        self.expect(TK_RBRACE)
-        return StructLiteral(type_name, fields)
+        next_tok = self.current()
+        if next_tok.kind == TK_DOT or next_tok.kind == TK_RBRACE:
+            fields = {}
+            while not self.match(TK_RBRACE):
+                self.expect(TK_DOT)
+                fname = self.expect(TK_IDENT).value
+                self.expect(TK_EQ)
+                val = self.parse_expr()
+                fields[fname] = val
+                if self.match(TK_COMMA):
+                    self.advance()
+            self.expect(TK_RBRACE)
+            return StructLiteral(type_name, fields)
+        else:
+            values = []
+            while not self.match(TK_RBRACE):
+                values.append(self.parse_expr())
+                if self.match(TK_COMMA):
+                    self.advance()
+            self.expect(TK_RBRACE)
+            return CastLiteral(type_name, values)
 
     def parse_expr_stmt(self):
         expr = self.parse_expr()
@@ -699,7 +777,7 @@ class Parser:
         return left
 
     def parse_ternary(self):
-        cond = self.parse_comparison()
+        cond = self.parse_logical_or()
         if self.match(TK_QUESTION):
             self.advance()
             then = self.parse_expr()
@@ -708,7 +786,21 @@ class Parser:
             return Ternary(cond, then, else_)
         return cond
 
+    def parse_logical_or(self):
+        left = self.parse_logical_and()
+        while self.match(TK_OROR):
+            self.advance()
+            right = self.parse_logical_and()
+            left = BinOp("||", left, right)
+        return left
 
+    def parse_logical_and(self):
+        left = self.parse_comparison()
+        while self.match(TK_ANDAND):
+            self.advance()
+            right = self.parse_comparison()
+            left = BinOp("&&", left, right)
+        return left
 
     def parse_comparison(self):
         left = self.parse_additive()
@@ -962,6 +1054,14 @@ class ReturnException(Exception):
         self.value = value
 
 
+class ContinueException(Exception):
+    pass
+
+
+class BreakException(Exception):
+    pass
+
+
 # ─────────────────────────────────────────────
 # INTERPRETER
 # ─────────────────────────────────────────────
@@ -1036,15 +1136,31 @@ class Interpreter:
 
         elif isinstance(stmt, WhileStmt):
             while self.eval_expr(stmt.cond, env):
-                self.exec_block(stmt.body, env)
+                try:
+                    self.exec_block(stmt.body, env)
+                except ContinueException:
+                    continue
+                except BreakException:
+                    break
 
         elif isinstance(stmt, ForStmt):
             if stmt.init is not None:
                 self.exec_stmt(stmt.init, env)
             while (stmt.cond is None or self.eval_expr(stmt.cond, env)):
-                self.exec_block(stmt.body, env)
+                try:
+                    self.exec_block(stmt.body, env)
+                except ContinueException:
+                    pass
+                except BreakException:
+                    break
                 if stmt.step is not None:
                     self.eval_expr(stmt.step, env)
+
+        elif isinstance(stmt, Continue):
+            raise ContinueException()
+
+        elif isinstance(stmt, Break):
+            raise BreakException()
 
         else:
             raise RuntimeError(f"Unknown statement: {type(stmt)}")
@@ -1086,6 +1202,16 @@ class Interpreter:
             return self.eval_fstring(expr.raw, env)
 
         if isinstance(expr, BinOp):
+            if expr.op == "||":
+                l = self.eval_expr(expr.left, env)
+                if l:
+                    return True
+                return bool(self.eval_expr(expr.right, env))
+            if expr.op == "&&":
+                l = self.eval_expr(expr.left, env)
+                if not l:
+                    return False
+                return bool(self.eval_expr(expr.right, env))
             l = self.eval_expr(expr.left, env)
             r = self.eval_expr(expr.right, env)
             return self.apply_binop(expr.op, l, r)
